@@ -312,6 +312,21 @@ def save_settings(data):
     except Exception:
         pass
 
+def load_layout_positions(settings, positions):
+    """Install `positions` as the authoritative layout for every monitor.
+
+    `positions` is the base layer every monitor falls back to;
+    `monitor_positions` is a per-monitor override layer that the QML resolver
+    (DesktopWidgets.qml `savedPos`) consults *before* the base layer. A layout
+    profile carries no per-monitor data, so a stale override left behind by an
+    earlier drag would otherwise keep shadowing the layout being loaded here -
+    the widget would stay where it was dragged instead of moving to the preset
+    spot. Clear the override layer; it rebuilds as the user drags within the
+    new layout.
+    """
+    settings['positions'] = copy.deepcopy(positions)
+    settings['monitor_positions'] = {}
+
 def main():
     settings = load_settings()
     action = sys.argv[1] if len(sys.argv) > 1 else 'load'
@@ -432,7 +447,7 @@ def main():
         if target_name in profs:
             prof = profs[target_name]
             settings['active_profile'] = target_name
-            settings['positions'] = copy.deepcopy(prof.get('positions', {}))
+            load_layout_positions(settings, prof.get('positions', {}))
             settings['enabled_widgets'] = list(prof.get('enabled_widgets', DEFAULT_ENABLED))
             if 'widget_settings' in prof:
                 settings['widget_settings'] = copy.deepcopy(prof.get('widget_settings', {}))
@@ -441,6 +456,7 @@ def main():
                 "status": "profile_switched",
                 "active_profile": target_name,
                 "positions": settings['positions'],
+                "monitor_positions": settings['monitor_positions'],
                 "enabled_widgets": settings['enabled_widgets'],
                 "widget_settings": settings.get('widget_settings', {})
             }))
@@ -553,7 +569,7 @@ def main():
                 }
                 settings['layout_profiles'] = profs
                 settings['active_profile'] = name
-                settings['positions'] = copy.deepcopy(profs[name]['positions'])
+                load_layout_positions(settings, profs[name]['positions'])
                 settings['enabled_widgets'] = list(profs[name]['enabled_widgets'])
                 if 'widget_settings' in profs[name]:
                     settings['widget_settings'] = copy.deepcopy(profs[name]['widget_settings'])
@@ -563,6 +579,7 @@ def main():
                     "name": name,
                     "path": src_path,
                     "positions": settings['positions'],
+                    "monitor_positions": settings['monitor_positions'],
                     "enabled_widgets": settings['enabled_widgets']
                 }))
             except Exception as e:
@@ -648,13 +665,13 @@ def main():
     elif action in ('reset', 'revert_layout'):
         saved = settings.get('saved_layout')
         if saved and isinstance(saved, dict) and ('positions' in saved or 'enabled_widgets' in saved):
-            settings['positions'] = copy.deepcopy(saved.get('positions', {}))
+            load_layout_positions(settings, saved.get('positions', {}))
             settings['enabled_widgets'] = list(saved.get('enabled_widgets', DEFAULT_ENABLED))
             if 'widget_settings' in saved:
                 settings['widget_settings'] = copy.deepcopy(saved.get('widget_settings', {}))
             reverted = True
         else:
-            settings['positions'] = {}
+            load_layout_positions(settings, {})
             settings['enabled_widgets'] = list(DEFAULT_ENABLED)
             reverted = False
         save_settings(settings)
@@ -663,12 +680,13 @@ def main():
             "reverted_to_saved": reverted,
             "has_saved_layout": bool(saved),
             "positions": settings['positions'],
+            "monitor_positions": settings['monitor_positions'],
             "enabled_widgets": settings['enabled_widgets'],
             "widget_settings": settings.get('widget_settings', {})
         }))
     elif action == 'reset_factory':
         settings.pop('saved_layout', None)
-        settings['positions'] = {}
+        load_layout_positions(settings, {})
         settings['enabled_widgets'] = list(DEFAULT_ENABLED)
         settings['appearance'] = copy.deepcopy(DEFAULT_APPEARANCE)
         settings['active_profile'] = "Default"
@@ -679,6 +697,7 @@ def main():
             "status": "factory_reset",
             "has_saved_layout": False,
             "positions": {},
+            "monitor_positions": {},
             "enabled_widgets": list(DEFAULT_ENABLED),
             "active_profile": "Default"
         }))
