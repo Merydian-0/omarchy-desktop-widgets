@@ -278,6 +278,9 @@ Item {
           if (res.status === "profile_switched") {
             root.activeProfile = res.active_profile
             if (res.positions) root.widgetPositions = res.positions
+            // The preset owns the layout now; drop stale per-monitor overrides
+            // so they don't shadow it (see load_layout_positions in the script).
+            if (res.monitor_positions !== undefined) root.monitorPositions = res.monitor_positions
             if (Array.isArray(res.enabled_widgets)) root.enabledWidgets = res.enabled_widgets
             if (res.widget_settings) root.widgetSettings = res.widget_settings
             root.showProfileNotice("Switched to '" + res.active_profile + "' preset")
@@ -347,6 +350,7 @@ Item {
           if (res.status === "imported") {
             root.activeProfile = res.name
             if (res.positions) root.widgetPositions = res.positions
+            if (res.monitor_positions !== undefined) root.monitorPositions = res.monitor_positions
             if (Array.isArray(res.enabled_widgets)) root.enabledWidgets = res.enabled_widgets
             if (res.widget_settings) root.widgetSettings = res.widget_settings
             root.showProfileNotice("Imported preset '" + res.name + "'")
@@ -381,6 +385,7 @@ Item {
         try {
           var res = JSON.parse(String(line).trim())
           if (res.positions !== undefined) root.widgetPositions = res.positions
+          if (res.monitor_positions !== undefined) root.monitorPositions = res.monitor_positions
           if (Array.isArray(res.enabled_widgets)) root.enabledWidgets = res.enabled_widgets
           if (res.widget_settings) root.widgetSettings = res.widget_settings
           if (res.has_saved_layout !== undefined) root.hasSavedLayout = res.has_saved_layout
