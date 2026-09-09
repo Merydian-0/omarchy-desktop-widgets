@@ -312,20 +312,25 @@ def save_settings(data):
     except Exception:
         pass
 
-def load_layout_positions(settings, positions):
-    """Install `positions` as the authoritative layout for every monitor.
+def load_layout_positions(settings, positions, monitor_positions=None):
+    """Install a whole layout as authoritative, replacing both position layers.
 
     `positions` is the base layer every monitor falls back to;
-    `monitor_positions` is a per-monitor override layer that the QML resolver
-    (DesktopWidgets.qml `savedPos`) consults *before* the base layer. A layout
-    profile carries no per-monitor data, so a stale override left behind by an
-    earlier drag would otherwise keep shadowing the layout being loaded here -
-    the widget would stay where it was dragged instead of moving to the preset
-    spot. Clear the override layer; it rebuilds as the user drags within the
-    new layout.
+    `monitor_positions` ({output: {widget: geom}}) is a per-monitor override
+    layer that the QML resolver (DesktopWidgets.qml `savedPos`) consults
+    *before* the base layer.
+
+    Both layers are replaced here, not merged: whatever the caller passes is
+    the layout now. A preset that was saved on a multi-monitor setup carries
+    its own `monitor_positions` and it is restored as-is. A preset with none
+    (the built-ins, presets saved before this field existed, imports from
+    another machine) passes `{}` / None, which clears the override layer so a
+    stale entry from an earlier drag cannot keep shadowing the layout being
+    loaded - the bug this function exists to prevent. The override layer then
+    rebuilds as the user drags within the new layout.
     """
     settings['positions'] = copy.deepcopy(positions)
-    settings['monitor_positions'] = {}
+    settings['monitor_positions'] = copy.deepcopy(monitor_positions or {})
 
 def main():
     settings = load_settings()
@@ -447,7 +452,7 @@ def main():
         if target_name in profs:
             prof = profs[target_name]
             settings['active_profile'] = target_name
-            load_layout_positions(settings, prof.get('positions', {}))
+            load_layout_positions(settings, prof.get('positions', {}), prof.get('monitor_positions'))
             settings['enabled_widgets'] = list(prof.get('enabled_widgets', DEFAULT_ENABLED))
             if 'widget_settings' in prof:
                 settings['widget_settings'] = copy.deepcopy(prof.get('widget_settings', {}))
@@ -469,6 +474,7 @@ def main():
             "name": target_name,
             "description": f"Custom layout profile saved on {target_name}",
             "positions": copy.deepcopy(settings.get('positions', {})),
+            "monitor_positions": copy.deepcopy(settings.get('monitor_positions', {})),
             "enabled_widgets": list(settings.get('enabled_widgets', DEFAULT_ENABLED)),
             "widget_settings": copy.deepcopy(settings.get('widget_settings', {}))
         }
@@ -488,6 +494,7 @@ def main():
                 "name": name,
                 "description": f"Custom layout preset '{name}'",
                 "positions": copy.deepcopy(settings.get('positions', {})),
+                "monitor_positions": copy.deepcopy(settings.get('monitor_positions', {})),
                 "enabled_widgets": list(settings.get('enabled_widgets', DEFAULT_ENABLED)),
                 "widget_settings": copy.deepcopy(settings.get('widget_settings', {}))
             }
@@ -525,6 +532,7 @@ def main():
             prof = {
                 "name": target_name,
                 "positions": copy.deepcopy(settings.get('positions', {})),
+                "monitor_positions": copy.deepcopy(settings.get('monitor_positions', {})),
                 "enabled_widgets": list(settings.get('enabled_widgets', DEFAULT_ENABLED)),
                 "widget_settings": copy.deepcopy(settings.get('widget_settings', {}))
             }
@@ -564,12 +572,13 @@ def main():
                     "name": name,
                     "description": prof.get('description', f"Imported from {os.path.basename(src_path)}"),
                     "positions": copy.deepcopy(prof.get('positions', {})),
+                    "monitor_positions": copy.deepcopy(prof.get('monitor_positions', {})),
                     "enabled_widgets": list(prof.get('enabled_widgets', DEFAULT_ENABLED)),
                     "widget_settings": copy.deepcopy(prof.get('widget_settings', {}))
                 }
                 settings['layout_profiles'] = profs
                 settings['active_profile'] = name
-                load_layout_positions(settings, profs[name]['positions'])
+                load_layout_positions(settings, profs[name]['positions'], profs[name]['monitor_positions'])
                 settings['enabled_widgets'] = list(profs[name]['enabled_widgets'])
                 if 'widget_settings' in profs[name]:
                     settings['widget_settings'] = copy.deepcopy(profs[name]['widget_settings'])
@@ -641,6 +650,7 @@ def main():
     elif action == 'save_layout_backup':
         backup = {
             'positions': copy.deepcopy(settings.get('positions', {})),
+            'monitor_positions': copy.deepcopy(settings.get('monitor_positions', {})),
             'enabled_widgets': list(settings.get('enabled_widgets', DEFAULT_ENABLED)),
             'widget_settings': copy.deepcopy(settings.get('widget_settings', {}))
         }
@@ -651,6 +661,7 @@ def main():
             "name": active,
             "description": f"Saved layout profile for {active}",
             "positions": copy.deepcopy(backup['positions']),
+            "monitor_positions": copy.deepcopy(backup['monitor_positions']),
             "enabled_widgets": list(backup['enabled_widgets']),
             "widget_settings": copy.deepcopy(backup['widget_settings'])
         }
@@ -665,7 +676,7 @@ def main():
     elif action in ('reset', 'revert_layout'):
         saved = settings.get('saved_layout')
         if saved and isinstance(saved, dict) and ('positions' in saved or 'enabled_widgets' in saved):
-            load_layout_positions(settings, saved.get('positions', {}))
+            load_layout_positions(settings, saved.get('positions', {}), saved.get('monitor_positions'))
             settings['enabled_widgets'] = list(saved.get('enabled_widgets', DEFAULT_ENABLED))
             if 'widget_settings' in saved:
                 settings['widget_settings'] = copy.deepcopy(saved.get('widget_settings', {}))
