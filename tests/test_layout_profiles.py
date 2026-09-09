@@ -11,11 +11,15 @@ layout one-for-one. ``manage-positions.sh`` keeps two position layers -
   * ``monitor_positions``  - a per-monitor override layer
 
 and the QML resolver (``DesktopWidgets.qml`` -> ``savedPos``) reads the
-override layer *first*. A profile only carries base ``positions``, so after a
-user had dragged a widget once (which writes an override), switching presets
-replaced ``positions`` but left the stale override in place - and the override
-kept winning, so the widget stayed where it was dragged instead of moving to
-the preset position.
+override layer *first*. Switching presets replaced ``positions`` but left a
+stale override from an earlier drag in place, and the override kept winning -
+so a dragged widget stayed put instead of moving to the preset position.
+
+The fix: a whole-layout load replaces *both* layers. A preset saved on a
+multi-monitor setup carries its own ``monitor_positions`` and it round-trips;
+a preset without one (built-ins, presets saved before the field existed,
+imports from another machine) loads an empty override layer, which clears the
+stale entry.
 """
 
 import json
@@ -69,9 +73,9 @@ class LayoutProfileTests(unittest.TestCase):
         return self.run_script("save_geometry", widget_id,
                                str(x), str(y), str(w), str(h), monitor)
 
-    # -- the regression -----------------------------------------------------
+    # -- the regression: unsaved drag must not survive a preset switch -----
 
-    def test_switch_profile_reflects_preset_after_a_drag(self):
+    def test_switch_builtin_preset_reflects_it_after_a_drag(self):
         self.run_script("switch_profile", "Default")
         # user nudges the clock somewhere else on their monitor
         self.drag("clock", 111, 222, 400, 300, "DP-1")
@@ -84,10 +88,9 @@ class LayoutProfileTests(unittest.TestCase):
         # Default preset puts the clock at (700, 20) - that is what must show,
         # not the dragged (111, 222).
         resolved = resolve_saved_pos(self.state(), "DP-1", "clock")
-        self.assertEqual(resolved["x"], 700)
-        self.assertEqual(resolved["y"], 20)
+        self.assertEqual((resolved["x"], resolved["y"]), (700, 20))
 
-    def test_switch_profile_clears_monitor_override_layer(self):
+    def test_switch_builtin_preset_loads_empty_override_layer(self):
         self.run_script("switch_profile", "Default")
         self.drag("clock", 111, 222, 400, 300, "DP-1")
         self.assertIn("DP-1", self.state()["monitor_positions"])
@@ -102,23 +105,45 @@ class LayoutProfileTests(unittest.TestCase):
         self.assertIn("monitor_positions", res)
         self.assertEqual(res["monitor_positions"], {})
 
-    # -- same bug class on the other wholesale-load paths ------------------
+    # -- saved presets round-trip per-monitor layout ---------------------
 
-    def test_import_profile_clears_monitor_override(self):
+    def test_saved_preset_round_trips_per_monitor_positions(self):
+        self.run_script("switch_profile", "Default")
+        # a multi-monitor user tunes the clock on their second output only
+        self.drag("clock", 1500, 900, 300, 200, "DP-2")
+        saved = self.run_script("save_profile", "Default")
+        self.assertIn("monitor_positions",
+                      saved["profile"])  # preset now stores the override layer
+
+        # leave and come back
+        self.run_script("switch_profile", "Gaming")
+        self.assertEqual(self.state()["monitor_positions"], {})  # Gaming has none
+        self.run_script("switch_profile", "Default")
+
+        st = self.state()
+        # the DP-2 tuning is back...
+        self.assertEqual(resolve_saved_pos(st, "DP-2", "clock"),
+                         {"x": 1500, "y": 900, "w": 300, "h": 200})
+        # ...and an output that was never tuned still falls back to base
+        self.assertEqual(resolve_saved_pos(st, "DP-1", "clock"),
+                         st["positions"]["clock"])
+
+    def test_new_preset_dialog_captures_monitor_positions(self):
+        # save_profile_dialog needs a name from a GUI prompt we can't drive, so
+        # exercise the equivalent named-save path and assert the stored shape.
+        self.run_script("switch_profile", "Default")
+        self.drag("clock", 40, 50, 100, 100, "eDP-1")
+        prof = self.run_script("save_profile", "WorkDualHead")["profile"]
+        self.assertEqual(prof["monitor_positions"]["eDP-1"]["clock"],
+                         {"x": 40, "y": 50, "w": 100, "h": 100})
+
+    # -- import / revert / factory-reset ---------------------------------
+
+    def test_import_without_monitor_positions_clears_override(self):
         self.run_script("switch_profile", "Default")
         self.drag("clock", 55, 66, 200, 200, "HDMI-A-1")
-
-        prof = {
-            "type": "omarchy-desktop-widgets-profile",
-            "profile": {
-                "name": "Imported",
-                "enabled_widgets": ["clock"],
-                "positions": {"clock": {"x": 900, "y": 100}},
-            },
-        }
-        path = os.path.join(self.home, "imported.json")
-        with open(path, "w") as f:
-            json.dump(prof, f)
+        path = self._write_profile(
+            "Imported", {"clock": {"x": 900, "y": 100}}, monitor_positions=None)
 
         res = self.run_script("import_profile", path)
         self.assertEqual(res["status"], "imported")
@@ -126,15 +151,25 @@ class LayoutProfileTests(unittest.TestCase):
         self.assertEqual(resolve_saved_pos(self.state(), "HDMI-A-1", "clock"),
                          {"x": 900, "y": 100})
 
-    def test_revert_layout_clears_monitor_override(self):
+    def test_import_with_monitor_positions_restores_them(self):
         self.run_script("switch_profile", "Default")
-        self.run_script("save_layout_backup")
-        self.drag("clock", 12, 34, 100, 100, "DP-1")
+        path = self._write_profile(
+            "ImportedDual", {"clock": {"x": 900, "y": 100}},
+            monitor_positions={"DP-3": {"clock": {"x": 12, "y": 34}}})
 
-        res = self.run_script("revert_layout")
-        self.assertEqual(self.state()["monitor_positions"], {})
-        resolved = resolve_saved_pos(self.state(), "DP-1", "clock")
-        self.assertEqual((resolved["x"], resolved["y"]), (700, 20))
+        self.run_script("import_profile", path)
+        self.assertEqual(resolve_saved_pos(self.state(), "DP-3", "clock"),
+                         {"x": 12, "y": 34})
+
+    def test_revert_layout_restores_saved_monitor_positions(self):
+        self.run_script("switch_profile", "Default")
+        self.drag("clock", 111, 111, 100, 100, "DP-1")
+        self.run_script("save_layout_backup")          # snapshot with the override
+        self.drag("clock", 999, 999, 100, 100, "DP-1")  # move it again
+
+        self.run_script("revert_layout")
+        self.assertEqual(resolve_saved_pos(self.state(), "DP-1", "clock"),
+                         {"x": 111, "y": 111, "w": 100, "h": 100})
 
     def test_factory_reset_clears_monitor_override(self):
         self.run_script("switch_profile", "Default")
@@ -142,7 +177,7 @@ class LayoutProfileTests(unittest.TestCase):
         self.run_script("reset_factory")
         self.assertEqual(self.state()["monitor_positions"], {})
 
-    # -- guardrails: the fix must not break the normal path ---------------
+    # -- guardrails: the fix must not break the normal path --------------
 
     def test_switch_profile_still_applies_positions_and_enabled(self):
         res = self.run_script("switch_profile", "Gaming")
@@ -154,7 +189,6 @@ class LayoutProfileTests(unittest.TestCase):
 
     def test_untouched_widget_resolves_to_base_position(self):
         self.run_script("switch_profile", "Default")
-        # never dragged -> no override -> resolver uses base positions
         self.assertEqual(resolve_saved_pos(self.state(), "DP-1", "gallery"),
                          {"x": 20, "y": 40, "w": 360, "h": 220})
 
@@ -167,6 +201,18 @@ class LayoutProfileTests(unittest.TestCase):
         # a different monitor with no override falls back to base
         self.assertEqual(resolve_saved_pos(self.state(), "DP-9", "clock"),
                          self.state()["positions"]["clock"])
+
+    # -- helpers --------------------------------------------------------
+
+    def _write_profile(self, name, positions, monitor_positions=None):
+        prof = {"name": name, "enabled_widgets": ["clock"], "positions": positions}
+        if monitor_positions is not None:
+            prof["monitor_positions"] = monitor_positions
+        payload = {"type": "omarchy-desktop-widgets-profile", "profile": prof}
+        path = os.path.join(self.home, f"{name}.json")
+        with open(path, "w") as f:
+            json.dump(payload, f)
+        return path
 
 
 if __name__ == "__main__":
