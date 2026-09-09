@@ -83,7 +83,10 @@ QtObject {
       icon: "\uf249",
       badge: "Scratchpad",
       description: "Markdown scratchpad and tagged Kanban todo deck with instant local state persistence.",
-      componentUrl: Qt.resolvedUrl("quick-notes/QuickNotesWidget.qml")
+      componentUrl: Qt.resolvedUrl("quick-notes/QuickNotesWidget.qml"),
+      // Has text fields - the desktop surface must be keyboard-capable while
+      // this is on screen (see lib/keyboard_focus.js).
+      keyboard: true
     },
     {
       id: "weather",
@@ -101,7 +104,9 @@ QtObject {
       icon: "\uf108",
       badge: "QuickLaunch",
       description: "Fast desktop application launcher with live search, category filters, and system icons.",
-      componentUrl: Qt.resolvedUrl("AppLauncherWidget.qml")
+      componentUrl: Qt.resolvedUrl("AppLauncherWidget.qml"),
+      // Live search field - needs keyboard focus on the desktop surface.
+      keyboard: true
     },
     {
       id: "folder_view",
@@ -138,5 +143,19 @@ QtObject {
       if (allWidgets[i].id === id) return allWidgets[i]
     }
     return null
+  }
+
+  // Ids of widgets that accept keyboard input. The desktop layer surface uses
+  // this to decide when it must be keyboard-capable (see lib/keyboard_focus.js).
+  readonly property var keyboardWidgetIds: {
+    var out = []
+    for (var i = 0; i < builtins.length; i++) {
+      if (builtins[i].keyboard) out.push(builtins[i].id)
+    }
+    return out
+  }
+
+  function widgetAcceptsKeyboard(id) {
+    return keyboardWidgetIds.indexOf(id) !== -1
   }
 }

@@ -11,6 +11,7 @@ import qs.Commons
 import qs.Ui
 import "widgets"
 import "components"
+import "lib/keyboard_focus.js" as KbFocus
 
 Item {
   id: root
@@ -30,7 +31,6 @@ Item {
   property bool presetsSubmenuOpen: false
   property bool manualHide: false
   property bool overlayActive: false
-  property bool keyboardFocusRequested: false
   property bool menuOpenRequested: false
   property int activeDragCount: 0
   readonly property bool isAnyWidgetDragging: activeDragCount > 0
@@ -52,6 +52,19 @@ Item {
   })
   property int preferencesTab: 0
   property bool surfaceRemapActive: true
+
+  // True while an enabled widget that accepts typing is on screen. The desktop
+  // layer surface uses this to decide it must be keyboard-capable up front
+  // (see lib/keyboard_focus.js) - otherwise a widget's TextInput holds a
+  // cursor while the compositor routes every keystroke elsewhere.
+  readonly property bool hasTypingWidget: {
+    var enabled = root.enabledWidgets || []
+    var kb = widgetRegistry.keyboardWidgetIds || []
+    for (var i = 0; i < kb.length; i++) {
+      if (enabled.indexOf(kb[i]) !== -1) return true
+    }
+    return false
+  }
 
   Timer {
     id: remapDelayTimer
@@ -638,7 +651,16 @@ Item {
         exclusionMode: ExclusionMode.Ignore
         WlrLayershell.namespace: "omarchy-desktop-widgets"
         WlrLayershell.layer: (root.overlayActive || root.preferencesOpen) ? WlrLayer.Overlay : WlrLayer.Bottom
-        WlrLayershell.keyboardFocus: (root.overlayActive || root.preferencesOpen) ? WlrKeyboardFocus.OnDemand : ((!desktopWindow.hasOpenWindows && (root.selectorOpen || root.keyboardFocusRequested)) ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.None)
+        // Policy in lib/keyboard_focus.js so it is unit-testable without a
+        // compositor. `OnDemand` never steals input - the compositor only
+        // turns it into real focus when this surface is actually clicked.
+        WlrLayershell.keyboardFocus: KbFocus.desktopKeyboardFocus({
+          overlayActive: root.overlayActive,
+          preferencesOpen: root.preferencesOpen,
+          selectorOpen: root.selectorOpen,
+          widgetsShown: widgetContainer.shouldShow,
+          hasTypingWidget: root.hasTypingWidget
+        }) === "OnDemand" ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.None
 
         Shortcut {
           sequence: "Escape"
