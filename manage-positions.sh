@@ -5,10 +5,87 @@ import json
 import shutil
 import subprocess
 import copy
+import atexit
+import fcntl
+import tempfile
+import time
 
 STATE_DIR = os.path.expanduser('~/.local/state/omarchy')
 STATE_FILE = os.path.join(STATE_DIR, 'dagyr.desktop-widgets.json')
 LEGACY_CONFIG = os.path.expanduser('~/.config/omarchy/plugins/dagyr.desktop-widgets/settings.json')
+LOCK_FILE = STATE_FILE + '.lock'
+BACKUP_FILE = STATE_FILE + '.bak'
+
+
+def _log(msg):
+    sys.stderr.write("manage-positions: %s\n" % msg)
+
+
+_lock_fd = None
+
+
+def acquire_lock(timeout=None):
+    """Serialize concurrent manage-positions.sh invocations.
+
+    The QML side fires these as detached processes (Quickshell.execDetached),
+    so several can be mid-run at once - each doing a full read / modify /
+    write of the entire state file. Without a lock, an interleaved pair loses
+    one side's change (a dragged widget's position, a toggled setting) with no
+    error. The lock is held for the life of the process; flock is released
+    automatically when the fd closes on exit.
+
+    On timeout we proceed anyway rather than hang the shell - a delayed write
+    is better than a stuck one, and atomic writes keep even that safe.
+    """
+    global _lock_fd
+    if timeout is None:
+        try:
+            timeout = float(os.environ.get("MANAGE_POSITIONS_LOCK_TIMEOUT", "5"))
+        except Exception:
+            timeout = 5.0
+    try:
+        _lock_fd = os.open(LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o600)
+    except Exception as e:
+        _log("could not open lock file: %s" % e)
+        return
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            atexit.register(release_lock)
+            return
+        except OSError:
+            if time.monotonic() >= deadline:
+                _log("timed out waiting for the state lock; proceeding without it")
+                return
+            time.sleep(0.05)
+
+
+def release_lock():
+    global _lock_fd
+    if _lock_fd is None:
+        return
+    try:
+        fcntl.flock(_lock_fd, fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        os.close(_lock_fd)
+    except Exception:
+        pass
+    _lock_fd = None
+
+
+def quarantine(path):
+    """Move an unreadable state file aside instead of letting it be clobbered."""
+    if not os.path.exists(path):
+        return
+    dest = "%s.corrupt-%s" % (path, time.strftime("%Y%m%d-%H%M%S"))
+    try:
+        os.rename(path, dest)
+        _log("state file was unreadable; moved it to %s" % dest)
+    except Exception as e:
+        _log("could not quarantine %s: %s" % (path, e))
 
 DEFAULT_ENABLED = ["clock", "gallery", "network", "media", "system"]
 
@@ -249,18 +326,38 @@ def migrate_custom_builtins(data):
 
 def load_settings():
     data = None
+    corrupt = False
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, 'r') as f:
                 data = json.load(f)
-        except Exception:
-            pass
+        except Exception as e:
+            corrupt = True
+            _log("%s is unreadable: %s" % (STATE_FILE, e))
     elif os.path.exists(LEGACY_CONFIG):
         try:
             with open(LEGACY_CONFIG, 'r') as f:
                 data = json.load(f)
         except Exception:
             pass
+
+    # A bad read must never turn into a write of defaults over the file - that
+    # is how a transient corruption became permanent data loss. Move the bad
+    # file aside, then try the rolling backup before falling back to defaults.
+    salvaged = False
+    if corrupt and not isinstance(data, dict):
+        quarantine(STATE_FILE)
+        for candidate in (BACKUP_FILE, LEGACY_CONFIG):
+            if not os.path.exists(candidate):
+                continue
+            try:
+                with open(candidate, 'r') as f:
+                    data = json.load(f)
+                _log("recovered settings from %s" % candidate)
+                salvaged = True
+                break
+            except Exception:
+                data = None
 
     if not isinstance(data, dict):
         data = {
@@ -302,15 +399,49 @@ def load_settings():
     if 'monitor_positions' not in data or not isinstance(data['monitor_positions'], dict):
         data['monitor_positions'] = {}
 
-    return migrate_custom_builtins(data)
+    data = migrate_custom_builtins(data)
+
+    # We quarantined the old file above; write the salvaged (or freshly
+    # defaulted) state back so the next reader starts from it.
+    if corrupt:
+        save_settings(data)
+        if not salvaged:
+            _log("could not recover; started a fresh state file "
+                 "(the unreadable one is kept alongside it as .corrupt-*)")
+
+    return data
 
 def save_settings(data):
+    """Persist the state file atomically, keeping one rolling backup.
+
+    Write to a temp file in the same directory, fsync, then rename over the
+    target - a crash or a concurrent reader never sees a half-written file.
+    The prior good copy is kept as `<state>.bak` so a single bad write (or an
+    unwanted reset) leaves one recoverable version behind.
+    """
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
-        with open(STATE_FILE, 'w') as f:
-            json.dump(data, f, indent=2)
-    except Exception:
-        pass
+        if os.path.exists(STATE_FILE):
+            try:
+                shutil.copy2(STATE_FILE, BACKUP_FILE)
+            except Exception:
+                pass
+        fd, tmp = tempfile.mkstemp(dir=STATE_DIR, prefix='.', suffix='.tmp')
+        try:
+            with os.fdopen(fd, 'w') as f:
+                json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, STATE_FILE)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
+            raise
+    except Exception as e:
+        _log("failed to save settings: %s" % e)
 
 def load_layout_positions(settings, positions, monitor_positions=None):
     """Install a whole layout as authoritative, replacing both position layers.
@@ -333,6 +464,7 @@ def load_layout_positions(settings, positions, monitor_positions=None):
     settings['monitor_positions'] = copy.deepcopy(monitor_positions or {})
 
 def main():
+    acquire_lock()
     settings = load_settings()
     action = sys.argv[1] if len(sys.argv) > 1 else 'load'
 
